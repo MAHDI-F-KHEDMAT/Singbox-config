@@ -126,7 +126,7 @@ def deduplicate_configs(configs):
             unique_configs.append(cfg)
     return unique_configs
 
-# ==================== ۴. تست لایه ۷ با ابزار پیشرفت کار مانیتورینگ ====================
+# ==================== ۴. تست لایه ۷ و مانیتورینگ گام‌های ۵ درصدی ====================
 def create_singbox_config(outbound_details, local_port):
     return {
         "log": {"level": "silent"},
@@ -135,7 +135,6 @@ def create_singbox_config(outbound_details, local_port):
     }
 
 async def test_l7_config(config, local_port, semaphore, tracker):
-    """ تست لایه ۷ کانفیگ + آپدیت زنده درصد پیشرفت کار """
     async with semaphore:
         config_file = f"temp_config_{local_port}.json"
         sb_config = create_singbox_config(config['singbox_outbound'], local_port)
@@ -172,14 +171,19 @@ async def test_l7_config(config, local_port, semaphore, tracker):
             if os.path.exists(config_file):
                 os.remove(config_file)
 
-        # 📊 آپدیت وضعیت ابزار مانیتورینگ پیشرفت
+        # 📊 محاسبه هوشمند پله‌های ۵ درصدی بدون شلوغ کردن ترمینال
         tracker["done"] += 1
         if is_working:
             tracker["alive"] += 1
             
-        percent = (tracker["done"] / tracker["total"]) * 100
-        # نمایش لحظه‌ای درصد و وضعیت در ترمینال
-        print(f"⏳ پیشرفت تست: {percent:.1f}% ({tracker['done']}/{tracker['total']}) | زنده تا این لحظه: {tracker['alive']}", end='\r', flush=True)
+        current_percent = (tracker["done"] / tracker["total"]) * 100
+        # پیدا کردن نزدیک‌ترین مضرب ۵ فِلور شده (مثلا برای ۷.۴٪ می‌شود ۵)
+        milestone = int(current_percent // 5) * 5
+        
+        # تنها در صورتی چاپ کن که به ۵ درصد بعدی رسیده باشیم یا کار ۱۰۰٪ تمام شده باشد
+        if milestone > tracker["last_milestone"] or tracker["done"] == tracker["total"]:
+            tracker["last_milestone"] = milestone
+            print(f"⏳ پیشرفت تست: {milestone}% | پردازش شده: {tracker['done']}/{tracker['total']} | سالم تا این لحظه: {tracker['alive']}")
 
         return {
             "remark": config['remark'],
@@ -188,7 +192,7 @@ async def test_l7_config(config, local_port, semaphore, tracker):
             "real_delay": round(real_delay, 2) if is_working else "Timeout"
         }
 
-# ==================== ۵. بدنه اصلی مدیریت فرآیند ====================
+# ==================== ۵. مدیریت فرآیند اصلی ====================
 async def main():
     print("--- مرحله ۱: دانلود هم‌زمان منابع گیت‌هاب ---")
     start_fetch = time.perf_counter()
@@ -223,24 +227,21 @@ async def main():
     max_concurrency = 30
     sem = asyncio.Semaphore(max_concurrency)
     
-    # 🛠 ساخت دیکشنری مانیتورینگ برای پاس دادن به ورکرها
+    # اضافه شدن متغیر استیتِ مایلستون قبلی
     progress_tracker = {
         "done": 0,
         "total": total_to_test,
-        "alive": 0
+        "alive": 0,
+        "last_milestone": 0 
     }
     
     start_test = time.perf_counter()
     test_tasks = []
     for idx, cfg in enumerate(clean_configs):
         assigned_port = 2000 + (idx % max_concurrency)
-        # پاس دادن سیستم مانیتورینگ به تابع تست
         test_tasks.append(test_l7_config(cfg, assigned_port, sem, progress_tracker))
 
     results = await asyncio.gather(*test_tasks)
-    
-    # چاپ یک اینتر در پایان کار مانیتورینگ تا خط بعدی خراب نشود
-    print("") 
 
     working_configs = [res for res in results if res['is_working']]
     working_configs.sort(key=lambda x: x['real_delay'])
