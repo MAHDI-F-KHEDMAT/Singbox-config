@@ -1,9 +1,9 @@
-name: Find Live Configs
+name: Find Live Configs with Xray
 
 on:
   schedule:
     - cron: '0 */6 * * *' # اجرای خودکار هر ۶ ساعت یک‌بار
-  workflow_dispatch: # ایجاد دکمه برای اجرای دستی از داخل گیت‌هاب
+  workflow_dispatch: # دکمه اجرای دستی
 
 jobs:
   run-tester:
@@ -22,32 +22,31 @@ jobs:
       run: |
         pip install aiohttp aiohttp_socks
 
-    - name: Download and Setup Sing-Box
+    - name: Download and Setup Xray Core
       run: |
-        # دانلود نسخه رسمی و پایدار sing-box مخصوص لینوکس گیت‌هاب اکشن
-        wget "https://github.com/SagerNet/sing-box/releases/download/v1.12.8/sing-box-1.12.8-linux-amd64.tar.gz"
+        # دانلود آخرین نسخه پایدار هسته رسمی Xray
+        wget "https://github.com/XTLS/Xray-core/releases/download/v1.8.24/Xray-linux-64.zip"
         
-        # استخراج فایل باینری از حالت فشرده
-        tar -xf "sing-box-1.12.8-linux-amd64.tar.gz"
+        # استخراج فایل باینری از حالت فشرده زیپ
+        unzip Xray-linux-64.zip -d xray_extracted
         
         # انتقال فایل اجرایی اصلی به پوشه اصلی پروژه
-        mv "sing-box-1.12.8-linux-amd64/sing-box" .
+        mv xray_extracted/xray .
         
-        # دادن دسترسی اجرایی به فایل در سرور لینوکس
-        chmod +x sing-box
+        # دادن دسترسی اجرایی به فایل در سرور لینوکس گیت‌هاب
+        chmod +x xray
         
-        # پاکسازی فایل‌های اضافه برای سبک شدن سرور
-        rm -rf sing-box-1.12.8*
+        # پاکسازی فایل‌های زیپ اضافه
+        rm -rf Xray-linux-64.zip xray_extracted
 
     - name: Run Config Tester Script
       run: |
         python main.py
 
-    - name: Commit and Push valid_configs.json
+    - name: Commit and Push Files
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
-        git add valid_configs.json
-        # فقط در صورتی تغییرات را کامیت کن که فایل جدیدی تولید شده باشد تا خطا ندهد
-        git diff --quiet && git diff --staged --quiet || git commit -m "Update live configs: $(date)"
+        git add valid_configs.json sub.txt
+        git diff --quiet && git diff --staged --quiet || git commit -m "Update configs using Xray: $(date)"
         git push
