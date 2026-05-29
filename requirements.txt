@@ -1,0 +1,2 @@
+aiohttp==3.11.11
+aiohttp_socks==0.9.1
