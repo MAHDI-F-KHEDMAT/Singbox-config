@@ -49,7 +49,6 @@ SOURCES = [
     "https://raw.githubusercontent.com/gfpcom/free-proxy-list/refs/heads/main/list/vless.txt"
 ]
 
-# ==================== ۱. دانلود و استخراج لینک‌ها ====================
 async def fetch_source(session, url):
     try:
         async with session.get(url, timeout=10) as response:
@@ -72,92 +71,120 @@ def extract_vless_links(raw_content):
     links = re.findall(r'(vless://[^\s"\']+)', text)
     return [unquote(link.strip()) for link in links]
 
-# ==================== ۲. پارسر و فیلتر (Reality / TLS) ====================
 def parse_vless_link(link):
     try:
         parsed = urlparse(link)
-        if parsed.scheme != 'vless':
-            return None
-        remark = unquote(parsed.fragment) if parsed.fragment else "VLESS_Server"
+        if parsed.scheme != 'vless': return None
+        remark = unquote(parsed.fragment) if parsed.fragment else "Xray_Server"
         netloc = parsed.netloc
+        if '@' not in netloc: return None
         uuid, server_port = netloc.split('@', 1)
+        if ':' not in server_port: return None
         server, port = server_port.split(':', 1)
         
         query_params = parse_qs(parsed.query)
         params = {k: v[0] for k, v in query_params.items()}
         security = params.get('security', '').lower()
         
-        if security not in ['reality', 'tls']:
-            return None
+        if security not in ['reality', 'tls']: return None
             
-        # اصلاح کلید از server_port به port و افزودن packet_encoding
+        # ساخت بخش Outbound مطابق با استانداردهای Xray-core
         outbound = {
-            "type": "vless", 
-            "tag": "proxy", 
-            "server": server, 
-            "port": int(port), 
-            "uuid": uuid,
-            "packet_encoding": "xudp"
+            "protocol": "vless",
+            "settings": {
+                "vnext": [{
+                    "address": server,
+                    "port": int(port),
+                    "users": [{
+                        "id": uuid,
+                        "encryption": "none"
+                    }]
+                }]
+            },
+            "streamSettings": {
+                "network": params.get('type', 'tcp').lower(),
+                "security": security
+            },
+            "tag": "proxy"
         }
-        if 'flow' in params: outbound['flow'] = params['flow']
         
-        tls_config = {"enabled": True, "server_name": params.get('sni', params.get('peer', ''))}
-        tls_config["utls"] = {"enabled": True, "fingerprint": params.get('fp', 'chrome')}
+        if 'flow' in params and params['flow']:
+            outbound["settings"]["vnext"][0]["users"][0]["flow"] = params['flow']
+            
+        sni = params.get('sni', params.get('peer', ''))
+        fp = params.get('fp', 'chrome')
         
         if security == 'reality':
-            tls_config['reality'] = {"enabled": True, "public_key": params.get('pbk', ''), "short_id": params.get('sid', '')}
-        outbound['tls'] = tls_config
-        
-        transport_type = params.get('type', 'tcp').lower()
-        if transport_type in ['ws', 'grpc']:
-            transport = {"type": transport_type}
-            if transport_type == 'ws':
-                transport['path'] = params.get('path', '/')
-                if 'host' in params: transport['headers'] = {"Host": params['host']}
-            elif transport_type == 'grpc':
-                transport['service_name'] = params.get('serviceName', params.get('path', ''))
-            outbound['transport'] = transport
+            pbk = params.get('pbk', '')
+            if not pbk: return None
+            outbound["streamSettings"]["realitySettings"] = {
+                "show": False,
+                "fingerprint": fp,
+                "serverName": sni,
+                "publicKey": pbk,
+                "shortId": params.get('sid', '')
+            }
+        elif security == 'tls':
+            outbound["streamSettings"]["tlsSettings"] = {
+                "serverName": sni,
+                "fingerprint": fp
+            }
             
-        return {"remark": remark, "singbox_outbound": outbound}
+        transport_type = outbound["streamSettings"]["network"]
+        if transport_type == 'ws':
+            outbound["streamSettings"]["wsSettings"] = {
+                "path": params.get('path', '/'),
+                "headers": {"Host": params['host']} if 'host' in params else {}
+            }
+        elif transport_type == 'grpc':
+            outbound["streamSettings"]["grpcSettings"] = {
+                "serviceName": params.get('serviceName', params.get('path', ''))
+            }
+            
+        return {"remark": remark, "xray_outbound": outbound, "raw_link": link, "server": server, "port": int(port)}
     except Exception:
         return None
 
-# ==================== ۳. حذف تکراری‌ها ====================
 def deduplicate_configs(configs):
     seen = set()
     unique_configs = []
     for cfg in configs:
-        outbound = cfg.get('singbox_outbound', {})
-        # حالا outbound.get('port') به درستی کار می‌کند
-        unique_key = f"{outbound.get('server')}:{outbound.get('port')}:{outbound.get('uuid', '')}"
+        unique_key = f"{cfg['server']}:{cfg['port']}"
         if unique_key not in seen:
             seen.add(unique_key)
             unique_configs.append(cfg)
     return unique_configs
 
-# ==================== ۴. تست لایه ۷ ====================
-def create_singbox_config(outbound_details, local_port):
+def create_xray_config(outbound_details, local_port):
     return {
-        "log": {"level": "silent"},
-        "inbounds": [{"type": "socks", "listen": "127.0.0.1", "listen_port": local_port}],
-        "outbounds": [outbound_details, {"type": "direct", "tag": "direct"}]
+        "log": {"loglevel": "none"},
+        "inbounds": [{
+            "port": local_port,
+            "listen": "127.0.0.1",
+            "protocol": "socks",
+            "settings": {"auth": "noauth", "udp": True}
+        }],
+        "outbounds": [
+            outbound_details,
+            {"protocol": "freedom", "tag": "direct"}
+        ]
     }
 
 async def test_l7_config(config, port_queue, semaphore, tracker):
     async with semaphore:
-        # گرفتن پورت خالی از صف
         local_port = await port_queue.get()
         config_file = f"temp_config_{local_port}.json"
-        sb_config = create_singbox_config(config['singbox_outbound'], local_port)
+        xr_config = create_xray_config(config['xray_outbound'], local_port)
         
         with open(config_file, 'w') as f:
-            json.dump(sb_config, f)
+            json.dump(xr_config, f)
 
+        # اجرای هسته Xray به جای سینگ باکس
         process = await asyncio.create_subprocess_exec(
-            './sing-box', 'run', '-c', config_file,
+            './xray', '-c', config_file,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
         )
-        await asyncio.sleep(0.5) # کمی مهلت برای بالا آمدن دقیق کور
+        await asyncio.sleep(0.4)
         
         url = "http://cp.cloudflare.com/generate_204"
         connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{local_port}")
@@ -166,9 +193,8 @@ async def test_l7_config(config, port_queue, semaphore, tracker):
         start_time = time.perf_counter()
 
         try:
-            # زمان تایم‌اوت را به ۵ ثانیه افزایش دادیم تا دقیق‌تر باشد
             async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(url, timeout=5.0) as response:
+                async with session.get(url, timeout=4.0) as response:
                     if response.status in [200, 204]:
                         is_working = True
                         real_delay = (time.perf_counter() - start_time) * 1000
@@ -180,77 +206,61 @@ async def test_l7_config(config, port_queue, semaphore, tracker):
                 await process.wait()
             except Exception:
                 pass
-            if os.path.exists(config_file):
-                os.remove(config_file)
-            
-            # بازگرداندن پورت به صف برای استفاده مجدد دیگر ورکرها
+            if os.path.exists(config_file): os.remove(config_file)
             await port_queue.put(local_port)
 
         tracker["done"] += 1
-        if is_working:
-            tracker["alive"] += 1
+        if is_working: tracker["alive"] += 1
             
         percent = (tracker["done"] / tracker["total"]) * 100
-        print(f"⏳ پیشرفت تست: {percent:.1f}% ({tracker['done']}/{tracker['total']}) | زنده تا این لحظه: {tracker['alive']}", end='\r', flush=True)
+        print(f"⏳ تست گیت‌هاب: {percent:.1f}% ({tracker['done']}/{tracker['total']}) | زنده در دیتاسنتر: {tracker['alive']}", end='\r', flush=True)
 
         return {
             "remark": config['remark'],
-            "singbox_outbound": config['singbox_outbound'],
+            "xray_outbound": config['xray_outbound'],
             "is_working": is_working,
             "real_delay": round(real_delay, 2) if is_working else "Timeout"
         }
 
-# ==================== ۵. بدنه اصلی مدیریت فرآیند ====================
 async def main():
-    print("--- مرحله ۱: دانلود هم‌زمان منابع گیت‌هاب ---")
-    start_fetch = time.perf_counter()
+    print("--- مرحله ۱: دانلود منابع ---")
     async with aiohttp.ClientSession() as session:
         fetch_tasks = [fetch_source(session, url) for url in SOURCES]
         raw_contents = await asyncio.gather(*fetch_tasks)
-    print(f"دانلود منابع تمام شد. زمان واکشی: {time.perf_counter() - start_fetch:.2f} ثانیه")
 
-    print("\n--- مرحله ۲: استخراج لینک‌ها و فیلتر کردن نوع امنیت (Reality/TLS) ---")
+    print("\n--- مرحله ۲: استخراج و فیلتر لینک‌ها ---")
     all_raw_links = []
     for content in raw_contents:
         all_raw_links.extend(extract_vless_links(content))
-    print(f"تعداد کل لینک‌های خام پیدا شده: {len(all_raw_links)}")
 
     parsed_configs = []
     for link in all_raw_links:
         parsed = parse_vless_link(link)
-        if parsed:
-            parsed_configs.append(parsed)
-    print(f"تعداد کانفیگ‌های مجاز (فقط Reality و TLS): {len(parsed_configs)}")
+        if parsed: parsed_configs.append(parsed)
 
-    print("\n--- مرحله ۳: حذف کانفیگ‌های تکراری (Deduplication) ---")
+    print("\n--- مرحله ۳: حذف تکراری‌ها و ساخت سابسکریپشن متنی گوشي ---")
     clean_configs = deduplicate_configs(parsed_configs)
     total_to_test = len(clean_configs)
-    print(f"تعداد کانفیگ‌های یکتای نهایی برای ارسال به تست لایه ۷: {total_to_test}")
+    print(f"تعداد کانفیگ‌های یکتای نهایی: {total_to_test}")
 
     if total_to_test == 0:
-        print("کانفیگی برای تست موجود نیست.")
+        print("هیچ کانفیگی یافت نشد.")
         return
 
-    print("\n--- مرحله ۴: شروع تست پایداری لایه ۷ ---")
-    max_concurrency = 40 # افزایش تعداد تسک‌های همزمان به ۴۰
+    # ذخیره کل کانفیگ‌های استخراج شده برای تست روی گوشی
+    with open("sub.txt", "w", encoding="utf-8") as f:
+        for cfg in clean_configs:
+            f.write(cfg['raw_link'] + "\n")
+    print("✅ تمام کانفیگ‌های یکتا در فایل sub.txt ذخیره شدند.")
+
+    print("\n--- مرحله ۴: شروع فرآیند تست لایه ۷ با Xray ---")
+    max_concurrency = 40
     sem = asyncio.Semaphore(max_concurrency)
-    
-    # ساخت صف پورت‌های مجاز برای جلوگیری از تداخل پورت‌ها در لایه TIME_WAIT
     port_queue = asyncio.Queue()
-    for p in range(10000, 10000 + max_concurrency):
-        port_queue.put_nowait(p)
+    for p in range(10000, 10000 + max_concurrency): port_queue.put_nowait(p)
     
-    progress_tracker = {
-        "done": 0,
-        "total": total_to_test,
-        "alive": 0
-    }
-    
-    start_test = time.perf_counter()
-    test_tasks = []
-    for cfg in clean_configs:
-        # فرستادن صف پورت به جای پورت ثابت پیش‌فرص
-        test_tasks.append(test_l7_config(cfg, port_queue, sem, progress_tracker))
+    progress_tracker = {"done": 0, "total": total_to_test, "alive": 0}
+    test_tasks = [test_l7_config(cfg, port_queue, sem, progress_tracker) for cfg in clean_configs]
 
     results = await asyncio.gather(*test_tasks)
     print("") 
@@ -258,12 +268,9 @@ async def main():
     working_configs = [res for res in results if res['is_working']]
     working_configs.sort(key=lambda x: x['real_delay'])
 
-    print(f"\n--- پایان کل فرآیند در {time.perf_counter() - start_test:.2f} ثانیه ---")
-    print(f"تعداد کانفیگ‌های ۱۰۰٪ سالم و پرسرعت: {len(working_configs)}")
-
     with open("valid_configs.json", "w", encoding="utf-8") as f:
         json.dump(working_configs, f, indent=2, ensure_ascii=False)
-    print("خروجی نهایی در فایل valid_configs.json ذخیره شد.")
+    print("خروجی فیلتر شده دیتاسنتر در valid_configs.json ذخیره شد.")
 
 if __name__ == "__main__":
     asyncio.run(main())
