@@ -81,28 +81,21 @@ def parse_vless_link(link):
         query_params = parse_qs(parsed.query)
         params = {k: v[0] for k, v in query_params.items()}
         security = params.get('security', '').lower()
-        
         if security not in ['reality', 'tls']: return None
             
         outbound = {
             "protocol": "vless",
             "settings": {
                 "vnext": [{
-                    "address": server,
-                    "port": int(port),
+                    "address": server, "port": int(port),
                     "users": [{"id": uuid, "encryption": "none"}]
                 }]
             },
-            "streamSettings": {
-                "network": params.get('type', 'tcp').lower(),
-                "security": security
-            },
+            "streamSettings": {"network": params.get('type', 'tcp').lower(), "security": security},
             "tag": "proxy"
         }
-        
         if 'flow' in params and params['flow']:
             outbound["settings"]["vnext"][0]["users"][0]["flow"] = params['flow']
-            
         sni = params.get('sni', params.get('peer', ''))
         fp = params.get('fp', 'chrome')
         
@@ -118,13 +111,10 @@ def parse_vless_link(link):
         transport_type = outbound["streamSettings"]["network"]
         if transport_type == 'ws':
             outbound["streamSettings"]["wsSettings"] = {
-                "path": params.get('path', '/'),
-                "headers": {"Host": params['host']} if 'host' in params else {}
+                "path": params.get('path', '/'), "headers": {"Host": params['host']} if 'host' in params else {}
             }
         elif transport_type == 'grpc':
-            outbound["streamSettings"]["grpcSettings"] = {
-                "serviceName": params.get('serviceName', params.get('path', ''))
-            }
+            outbound["streamSettings"]["grpcSettings"] = {"serviceName": params.get('serviceName', params.get('path', ''))}
             
         return {"remark": remark, "xray_outbound": outbound, "raw_link": link, "server": server, "port": int(port)}
     except Exception: return None
@@ -148,8 +138,8 @@ def create_xray_config(outbound_details, local_port):
         "outbounds": [outbound_details, {"protocol": "freedom", "tag": "direct"}]
     }
 
-# --- تست سریع مرحله اول ---
-async def test_quick_alive(config, port_queue, semaphore, tracker):
+# --- تست سریع مرحله اول با نشست‌های بازیافت‌شده ---
+async def test_quick_alive(config, port_queue, semaphore, sessions_pool, tracker):
     async with semaphore:
         local_port = await port_queue.get()
         config_file = f"temp_quick_{local_port}.json"
@@ -160,16 +150,15 @@ async def test_quick_alive(config, port_queue, semaphore, tracker):
         process = await asyncio.create_subprocess_exec(
             './xray', '-c', config_file, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
         )
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.25)
         
         url = "http://cp.cloudflare.com/generate_204"
-        connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{local_port}")
+        session = sessions_pool[local_port] # استفاده از سشن ثابت پورت جهت جلوگیری از پر شدن سوکت
         is_alive = False
 
         try:
-            async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(url, timeout=3.0) as response:
-                    if response.status in [200, 204]: is_alive = True
+            async with session.get(url, timeout=2.5) as response:
+                if response.status in [200, 204]: is_alive = True
         except Exception: pass
         finally:
             try:
@@ -181,11 +170,15 @@ async def test_quick_alive(config, port_queue, semaphore, tracker):
 
         tracker["done"] += 1
         if is_alive: tracker["alive"] += 1
-        print(f"   📊 پیشرفت غربالگری اولیه Xray: {tracker['done']}/{tracker['total']} | زنده تا الان: {tracker['alive']}", end='\r', flush=True)
+        
+        # چاپ استاندارد بدون \r هر ۲۰۰ کانفیگ یک‌بار برای سبک نگه داشتن ریپورت گیت‌هاب
+        if tracker["done"] % 200 == 0 or tracker["done"] == tracker["total"]:
+            print(f"   📊 پیشرفت مرحله اول Xray: {tracker['done']}/{tracker['total']} | زنده تا این لحظه: {tracker['alive']}")
+            
         return config if is_alive else None
 
 # --- تست پایداری مرحله دوم ---
-async def test_10s_stability(config, port_queue, semaphore, tracker):
+async def test_10s_stability(config, port_queue, semaphore, sessions_pool, tracker):
     async with semaphore:
         local_port = await port_queue.get()
         config_file = f"temp_stable_{local_port}.json"
@@ -196,22 +189,20 @@ async def test_10s_stability(config, port_queue, semaphore, tracker):
         process = await asyncio.create_subprocess_exec(
             './xray', '-c', config_file, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
         )
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.3)
         
         url = "http://cp.cloudflare.com/generate_204"
-        connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{local_port}")
-        
+        session = sessions_pool[local_port]
         success_checks = 0
         delays = []
         
         for i in range(5):
             start_time = time.perf_counter()
             try:
-                async with aiohttp.ClientSession(connector=connector) as session:
-                    async with session.get(url, timeout=2.0) as response:
-                        if response.status in [200, 204]:
-                            success_checks += 1
-                            delays.append((time.perf_counter() - start_time) * 1000)
+                async with session.get(url, timeout=2.0) as response:
+                    if response.status in [200, 204]:
+                        success_checks += 1
+                        delays.append((time.perf_counter() - start_time) * 1000)
             except Exception: pass
             if i < 4: await asyncio.sleep(2.0)
 
@@ -226,13 +217,15 @@ async def test_10s_stability(config, port_queue, semaphore, tracker):
         if success_checks == 5:
             tracker["stable"] += 1
             avg_delay = round(sum(delays) / 5, 2)
-            print(f"   🧬 پیشرفت تست پایداری ۱۰ ثانیه‌ای: {tracker['done']}/{tracker['total']} | فوق پایدار نهایی: {tracker['stable']}", end='\r', flush=True)
+            if tracker["done"] % 20 == 0 or tracker["done"] == tracker["total"]:
+                print(f"   🧬 پیشرفت تست پایداری: {tracker['done']}/{tracker['total']} | فوق پایدار ثبت شده: {tracker['stable']}")
             return {
                 "remark": config['remark'], "xray_outbound": config['xray_outbound'], "raw_link": config['raw_link'],
                 "stability": "100%", "avg_delay_ms": avg_delay
             }
         
-        print(f"   🧬 پیشرفت تست پایداری ۱۰ ثانیه‌ای: {tracker['done']}/{tracker['total']} | فوق پایدار نهایی: {tracker['stable']}", end='\r', flush=True)
+        if tracker["done"] % 20 == 0 or tracker["done"] == tracker["total"]:
+            print(f"   🧬 پیشرفت تست پایداری: {tracker['done']}/{tracker['total']} | فوق پایدار ثبت شده: {tracker['stable']}")
         return None
 
 async def main():
@@ -252,56 +245,69 @@ async def main():
 
     clean_configs = deduplicate_configs(parsed_configs)
     total_configs = len(clean_configs)
-    print(f"📢 تعداد کل کانفیگ‌های منحصربه‌فرد برای شروع فرآیند: {total_configs}")
+    print(f"📢 تعداد کل کانفیگ‌های منحصربه‌فرد برای تست: {total_configs}")
 
     if total_configs == 0:
         print("❌ هیچ کانفیگ معتبری پیدا نشد.")
         return
 
+    # پیکربندی صف پورت‌ها و همزمانی
     max_concurrency = 40
+    start_port = 10000
     port_queue = asyncio.Queue()
-    for p in range(10000, 10000 + max_concurrency): port_queue.put_nowait(p)
+    for p in range(start_port, start_port + max_concurrency): port_queue.put_nowait(p)
     sem = asyncio.Semaphore(max_concurrency)
 
-    # 📌 شروع رسمی مرحله اول (Xray)
-    print("\n⚡ [مرحله اول]: شروع تست سریع زنده بودن با هسته Xray...")
-    quick_tracker = {"done": 0, "total": total_configs, "alive": 0}
-    quick_tasks = [test_quick_alive(cfg, port_queue, sem, quick_tracker) for cfg in clean_configs]
-    quick_results = await asyncio.gather(*quick_tasks)
-    
-    alive_first_stage = [res for res in quick_results if res is not None]
-    total_alive = len(alive_first_stage)
-    
-    # 🎯 اینجا نتایج مرحله اول کاملاً مشخص و چاپ می‌شود
-    print(f"\n\n🏁 نتایج مرحله اول مشخص شد:")
-    print(f"   🔹 تعداد کل کانفیگ‌های اسکن شده: {total_configs}")
-    print(f"   🔹 تعداد کانفیگ‌های زنده عبور کرده از فیلتر اول Xray: {total_alive}")
+    # 🛑 ساخت استخر سشن‌های ثابت پورت برای جلوگیری از باز و بسته شدن مکرر سوکت‌ها (حل مشکل قفل شدن شبکه)
+    sessions_pool = {}
+    for p in range(start_port, start_port + max_concurrency):
+        connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{p}")
+        sessions_pool[p] = aiohttp.ClientSession(connector=connector)
 
-    if total_alive == 0:
-        print("❌ متاسفانه هیچ کانفیگی از مرحله اول زنده بیرون نیامد. پایان عملیات.")
-        return
-
-    # 📌 شروع رسمی مرحله دوم (Stability)
-    print(f"\n🚀 [مرحله دوم]: شروع تست قرنطینه ۱۰ ثانیه‌ای فقط برای {total_alive} کانفیگ زنده...")
-    stable_sem = asyncio.Semaphore(15) 
-    stable_tracker = {"done": 0, "total": total_alive, "stable": 0}
-    stable_tasks = [test_10s_stability(cfg, port_queue, stable_sem, stable_tracker) for cfg in alive_first_stage]
-    stable_results = await asyncio.gather(*stable_tasks)
-    
-    final_stable_configs = [res for res in stable_results if res is not None]
-    final_stable_configs.sort(key=lambda x: x['avg_delay_ms'])
-
-    print(f"\n\n🏁 نتایج نهایی تست پایداری مشخص شد:")
-    print(f"   👑 تعداد کانفیگ‌های ۱۰۰٪ پایدار و بدون پکت‌لاست: {len(final_stable_configs)}")
-
-    print("\n--- مرحله ۵: ذخیره‌سازی فایل‌های نهایی در ریپازیتوری ---")
-    with open("sub.txt", "w", encoding="utf-8") as f:
-        for cfg in final_stable_configs: f.write(cfg['raw_link'] + "\n")
-            
-    with open("valid_configs.json", "w", encoding="utf-8") as f:
-        json.dump(final_stable_configs, f, indent=2, ensure_ascii=False)
+    try:
+        # 📌 شروع رسمی مرحله اول (Xray)
+        print("\n⚡ [مرحله اول]: شروع تست سریع زنده بودن با هسته Xray...")
+        quick_tracker = {"done": 0, "total": total_configs, "alive": 0}
+        quick_tasks = [test_quick_alive(cfg, port_queue, sem, sessions_pool, quick_tracker) for cfg in clean_configs]
+        quick_results = await asyncio.gather(*quick_tasks)
         
-    print(f"✅ فایل‌های sub.txt و valid_configs.json با موفقیت آپدیت شدند.")
+        alive_first_stage = [res for res in quick_results if res is not None]
+        total_alive = len(alive_first_stage)
+        
+        print(f"\n🏁 نتایج مرحله اول مشخص شد:")
+        print(f"   🔹 تعداد کانفیگ‌های اسکن شده: {total_configs}")
+        print(f"   🔹 تعداد کانفیگ‌های زنده عبور کرده از فیلتر اول Xray: {total_alive}")
+
+        if total_alive == 0:
+            print("❌ متاسفانه هیچ کانفیگی از مرحله اول زنده بیرون نیامد. پایان عملیات.")
+            return
+
+        # 📌 شروع رسمی مرحله دوم (Stability)
+        print(f"\n🚀 [مرحله دوم]: شروع تست قرنطینه ۱۰ ثانیه‌ای فقط برای {total_alive} کانفیگ زنده...")
+        stable_sem = asyncio.Semaphore(15) 
+        stable_tracker = {"done": 0, "total": total_alive, "stable": 0}
+        stable_tasks = [test_10s_stability(cfg, port_queue, stable_sem, sessions_pool, stable_tracker) for cfg in alive_first_stage]
+        stable_results = await asyncio.gather(*stable_tasks)
+        
+        final_stable_configs = [res for res in stable_results if res is not None]
+        final_stable_configs.sort(key=lambda x: x['avg_delay_ms'])
+
+        print(f"\n🏁 نتایج نهایی تست پایداری مشخص شد:")
+        print(f"   👑 تعداد کانفیگ‌های ۱۰۰٪ پایدار و بدون پکت‌لاست: {len(final_stable_configs)}")
+
+        print("\n--- مرحله ۵: ذخیره‌سازی فایل‌های نهایی در ریپازیتوری ---")
+        with open("sub.txt", "w", encoding="utf-8") as f:
+            for cfg in final_stable_configs: f.write(cfg['raw_link'] + "\n")
+                
+        with open("valid_configs.json", "w", encoding="utf-8") as f:
+            json.dump(final_stable_configs, f, indent=2, ensure_ascii=False)
+            
+        print(f"✅ فایل‌های sub.txt و valid_configs.json با موفقیت آپدیت شدند.")
+        
+    finally:
+        # بستن اصولی استخر سشن‌ها در پایان کار
+        for p, sess in sessions_pool.items():
+            await sess.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
