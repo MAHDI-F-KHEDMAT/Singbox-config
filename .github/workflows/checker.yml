@@ -1,0 +1,42 @@
+name: L7 VLESS Configs Checker
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # اجرای خودکار هر ۶ ساعت یک‌بار
+  workflow_dispatch: # فعال کردن دکمه اجرای دستی در گیت‌هاب
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install aiohttp aiohttp_socks
+
+    - name: Install Sing-box Core
+      run: |
+        wget https://github.com/SagerNet/sing-box/releases/download/v1.11.0-alpha.5/sing-box-1.11.0-alpha.5-linux-amd64.tar.gz
+        tar -xvf sing-box-1.11.0-alpha.5-linux-amd64.tar.gz
+        mv sing-box-1.11.0-alpha.5-linux-amd64/sing-box .
+        chmod +x sing-box
+
+    - name: Run Checker Script
+      run: python checker.py
+
+    - name: Commit and Push valid_configs.json
+      run: |
+        git config --local user.email "actions@github.com"
+        git config --local user.name "GitHub Actions"
+        git add valid_configs.json
+        # فقط در صورتی کامیت کن که تغییراتی در فایل نهایی ایجاد شده باشد تا خطا ندهد
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Update valid configs [L7 Tested]" && git push)
