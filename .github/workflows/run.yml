@@ -1,0 +1,53 @@
+name: Find Live Configs
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # اجرای خودکار هر ۶ ساعت یک‌بار
+  workflow_dispatch: # ایجاد دکمه برای اجرای دستی از داخل گیت‌هاب
+
+jobs:
+  run-tester:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        pip install aiohttp aiohttp_socks
+
+    - name: Download and Setup Sing-Box
+      run: |
+        # دانلود نسخه رسمی و پایدار sing-box مخصوص لینوکس گیت‌هاب اکشن
+        wget "https://github.com/SagerNet/sing-box/releases/download/v1.12.8/sing-box-1.12.8-linux-amd64.tar.gz"
+        
+        # استخراج فایل باینری از حالت فشرده
+        tar -xf "sing-box-1.12.8-linux-amd64.tar.gz"
+        
+        # انتقال فایل اجرایی اصلی به پوشه اصلی پروژه
+        mv "sing-box-1.12.8-linux-amd64/sing-box" .
+        
+        # دادن دسترسی اجرایی به فایل در سرور لینوکس
+        chmod +x sing-box
+        
+        # پاکسازی فایل‌های اضافه برای سبک شدن سرور
+        rm -rf sing-box-1.12.8*
+
+    - name: Run Config Tester Script
+      run: |
+        python main.py
+
+    - name: Commit and Push valid_configs.json
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add valid_configs.json
+        # فقط در صورتی تغییرات را کامیت کن که فایل جدیدی تولید شده باشد تا خطا ندهد
+        git diff --quiet && git diff --staged --quiet || git commit -m "Update live configs: $(date)"
+        git push
