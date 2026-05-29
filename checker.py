@@ -46,7 +46,7 @@ SOURCES = [
     "https://raw.githubusercontent.com/AvenCores/goida-vpn-configs/refs/heads/main/githubmirror/14.txt",
     "https://raw.githubusercontent.com/Awmiroosen/awmirx-v2ray/refs/heads/main/blob/main/v2-sub.txt",
     "https://raw.githubusercontent.com/SoliSpirit/v2ray-configs/refs/heads/main/Protocols/vless.txt",
-    "https://media.githubusercontent.com/media/gfpcom/free-proxy-list/refs/heads/main/list/vless.txt"
+    "https://raw.githubusercontent.com/gfpcom/free-proxy-list/refs/heads/main/list/vless.txt"
 ]
 
 # ==================== ۱. دانلود و استخراج لینک‌ها ====================
@@ -90,7 +90,15 @@ def parse_vless_link(link):
         if security not in ['reality', 'tls']:
             return None
             
-        outbound = {"type": "vless", "tag": "proxy", "server": server, "server_port": int(port), "uuid": uuid}
+        # اصلاح کلید از server_port به port و افزودن packet_encoding
+        outbound = {
+            "type": "vless", 
+            "tag": "proxy", 
+            "server": server, 
+            "port": int(port), 
+            "uuid": uuid,
+            "packet_encoding": "xudp"
+        }
         if 'flow' in params: outbound['flow'] = params['flow']
         
         tls_config = {"enabled": True, "server_name": params.get('sni', params.get('peer', ''))}
@@ -120,13 +128,14 @@ def deduplicate_configs(configs):
     unique_configs = []
     for cfg in configs:
         outbound = cfg.get('singbox_outbound', {})
+        # حالا outbound.get('port') به درستی کار می‌کند
         unique_key = f"{outbound.get('server')}:{outbound.get('port')}:{outbound.get('uuid', '')}"
         if unique_key not in seen:
             seen.add(unique_key)
             unique_configs.append(cfg)
     return unique_configs
 
-# ==================== ۴. تست لایه ۷ با ابزار پیشرفت کار مانیتورینگ ====================
+# ==================== ۴. تست لایه ۷ ====================
 def create_singbox_config(outbound_details, local_port):
     return {
         "log": {"level": "silent"},
@@ -134,9 +143,10 @@ def create_singbox_config(outbound_details, local_port):
         "outbounds": [outbound_details, {"type": "direct", "tag": "direct"}]
     }
 
-async def test_l7_config(config, local_port, semaphore, tracker):
-    """ تست لایه ۷ کانفیگ + آپدیت زنده درصد پیشرفت کار """
+async def test_l7_config(config, port_queue, semaphore, tracker):
     async with semaphore:
+        # گرفتن پورت خالی از صف
+        local_port = await port_queue.get()
         config_file = f"temp_config_{local_port}.json"
         sb_config = create_singbox_config(config['singbox_outbound'], local_port)
         
@@ -147,7 +157,7 @@ async def test_l7_config(config, local_port, semaphore, tracker):
             './sing-box', 'run', '-c', config_file,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
         )
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.5) # کمی مهلت برای بالا آمدن دقیق کور
         
         url = "http://cp.cloudflare.com/generate_204"
         connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{local_port}")
@@ -156,8 +166,9 @@ async def test_l7_config(config, local_port, semaphore, tracker):
         start_time = time.perf_counter()
 
         try:
+            # زمان تایم‌اوت را به ۵ ثانیه افزایش دادیم تا دقیق‌تر باشد
             async with aiohttp.ClientSession(connector=connector) as session:
-                async with session.get(url, timeout=3.0) as response:
+                async with session.get(url, timeout=5.0) as response:
                     if response.status in [200, 204]:
                         is_working = True
                         real_delay = (time.perf_counter() - start_time) * 1000
@@ -171,14 +182,15 @@ async def test_l7_config(config, local_port, semaphore, tracker):
                 pass
             if os.path.exists(config_file):
                 os.remove(config_file)
+            
+            # بازگرداندن پورت به صف برای استفاده مجدد دیگر ورکرها
+            await port_queue.put(local_port)
 
-        # 📊 آپدیت وضعیت ابزار مانیتورینگ پیشرفت
         tracker["done"] += 1
         if is_working:
             tracker["alive"] += 1
             
         percent = (tracker["done"] / tracker["total"]) * 100
-        # نمایش لحظه‌ای درصد و وضعیت در ترمینال
         print(f"⏳ پیشرفت تست: {percent:.1f}% ({tracker['done']}/{tracker['total']}) | زنده تا این لحظه: {tracker['alive']}", end='\r', flush=True)
 
         return {
@@ -220,10 +232,14 @@ async def main():
         return
 
     print("\n--- مرحله ۴: شروع تست پایداری لایه ۷ ---")
-    max_concurrency = 30
+    max_concurrency = 40 # افزایش تعداد تسک‌های همزمان به ۴۰
     sem = asyncio.Semaphore(max_concurrency)
     
-    # 🛠 ساخت دیکشنری مانیتورینگ برای پاس دادن به ورکرها
+    # ساخت صف پورت‌های مجاز برای جلوگیری از تداخل پورت‌ها در لایه TIME_WAIT
+    port_queue = asyncio.Queue()
+    for p in range(10000, 10000 + max_concurrency):
+        port_queue.put_nowait(p)
+    
     progress_tracker = {
         "done": 0,
         "total": total_to_test,
@@ -232,14 +248,11 @@ async def main():
     
     start_test = time.perf_counter()
     test_tasks = []
-    for idx, cfg in enumerate(clean_configs):
-        assigned_port = 2000 + (idx % max_concurrency)
-        # پاس دادن سیستم مانیتورینگ به تابع تست
-        test_tasks.append(test_l7_config(cfg, assigned_port, sem, progress_tracker))
+    for cfg in clean_configs:
+        # فرستادن صف پورت به جای پورت ثابت پیش‌فرص
+        test_tasks.append(test_l7_config(cfg, port_queue, sem, progress_tracker))
 
     results = await asyncio.gather(*test_tasks)
-    
-    # چاپ یک اینتر در پایان کار مانیتورینگ تا خط بعدی خراب نشود
     print("") 
 
     working_configs = [res for res in results if res['is_working']]
