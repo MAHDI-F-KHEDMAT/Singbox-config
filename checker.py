@@ -8,7 +8,6 @@ from urllib.parse import urlparse, parse_qs, unquote
 import aiohttp
 from aiohttp_socks import ProxyConnector
 
-# 🌐 لیست ۳۸ منبع ارسالی شما
 SOURCES = [
     "https://raw.githubusercontent.com/itsyebekhe/PSG/main/subscriptions/xray/base64/mix",
     "https://raw.githubusercontent.com/shaoyouvip/free/refs/heads/main/base64.txt",
@@ -50,9 +49,8 @@ SOURCES = [
     "https://media.githubusercontent.com/media/gfpcom/free-proxy-list/refs/heads/main/list/vless.txt"
 ]
 
-# ==================== ۱. واکشی دیتای منابع و استخراج لینک‌ها ====================
+# ==================== ۱. دانلود و استخراج لینک‌ها ====================
 async def fetch_source(session, url):
-    """ دانلود محتوای یک آدرس با تایم‌اوت ۱۰ ثانیه‌ای """
     try:
         async with session.get(url, timeout=10) as response:
             if response.status == 200:
@@ -62,72 +60,44 @@ async def fetch_source(session, url):
     return ""
 
 def extract_vless_links(raw_content):
-    """ تشخیص هوشمند محتوای Base64 و استخراج تمام لینک‌های vless:// با Regex """
     if not raw_content:
         return []
-        
     text = raw_content.strip()
-    
-    # اگر کلمه vless:// در متن نباشد، احتمالاً کل متن Base64 است
     if "vless://" not in text:
         try:
-            cleaned_text = re.sub(r'\s+', '', text) # حذف فضاها و اینترها
-            decoded_bytes = base64.b64decode(cleaned_text)
-            text = decoded_bytes.decode('utf-8', errors='ignore')
+            cleaned_text = re.sub(r'\s+', '', text)
+            text = base64.b64decode(cleaned_text).decode('utf-8', errors='ignore')
         except Exception:
             pass
-            
-    # استخراج همه‌ی لینک‌های VLESS (این رکس با کدهای HTML و متون مخدوش هم سازگار است)
     links = re.findall(r'(vless://[^\s"\']+)', text)
     return [unquote(link.strip()) for link in links]
 
-# ==================== ۲. پارسر و فیلتر اختصاصی VLESS (Reality / TLS) ====================
+# ==================== ۲. پارسر و فیلتر (Reality / TLS) ====================
 def parse_vless_link(link):
     try:
         parsed = urlparse(link)
         if parsed.scheme != 'vless':
             return None
-            
         remark = unquote(parsed.fragment) if parsed.fragment else "VLESS_Server"
         netloc = parsed.netloc
-        if '@' not in netloc or ':' not in netloc.split('@')[1]:
-            return None
-            
         uuid, server_port = netloc.split('@', 1)
         server, port = server_port.split(':', 1)
         
         query_params = parse_qs(parsed.query)
         params = {k: v[0] for k, v in query_params.items()}
-        
         security = params.get('security', '').lower()
-        # ⚡️ فیلتر فقط برای کانفیگ‌های Reality و TLS
+        
         if security not in ['reality', 'tls']:
             return None
             
-        outbound = {
-            "type": "vless",
-            "tag": "proxy",
-            "server": server,
-            "server_port": int(port),
-            "uuid": uuid
-        }
+        outbound = {"type": "vless", "tag": "proxy", "server": server, "server_port": int(port), "uuid": uuid}
+        if 'flow' in params: outbound['flow'] = params['flow']
         
-        if 'flow' in params:
-            outbound['flow'] = params['flow']
-            
-        tls_config = {
-            "enabled": True,
-            "server_name": params.get('sni', params.get('peer', ''))
-        }
+        tls_config = {"enabled": True, "server_name": params.get('sni', params.get('peer', ''))}
         tls_config["utls"] = {"enabled": True, "fingerprint": params.get('fp', 'chrome')}
         
         if security == 'reality':
-            tls_config['reality'] = {
-                "enabled": True,
-                "public_key": params.get('pbk', ''),
-                "short_id": params.get('sid', '')
-            }
-            
+            tls_config['reality'] = {"enabled": True, "public_key": params.get('pbk', ''), "short_id": params.get('sid', '')}
         outbound['tls'] = tls_config
         
         transport_type = params.get('type', 'tcp').lower()
@@ -135,8 +105,7 @@ def parse_vless_link(link):
             transport = {"type": transport_type}
             if transport_type == 'ws':
                 transport['path'] = params.get('path', '/')
-                if 'host' in params:
-                    transport['headers'] = {"Host": params['host']}
+                if 'host' in params: transport['headers'] = {"Host": params['host']}
             elif transport_type == 'grpc':
                 transport['service_name'] = params.get('serviceName', params.get('path', ''))
             outbound['transport'] = transport
@@ -145,23 +114,19 @@ def parse_vless_link(link):
     except Exception:
         return None
 
-# ==================== ۳. حذف کانفیگ‌های تکراری ====================
+# ==================== ۳. حذف تکراری‌ها ====================
 def deduplicate_configs(configs):
     seen = set()
     unique_configs = []
     for cfg in configs:
         outbound = cfg.get('singbox_outbound', {})
-        server = outbound.get('server')
-        port = outbound.get('port')
-        uuid = outbound.get('uuid', '')
-        
-        unique_key = f"{server}:{port}:{uuid}"
+        unique_key = f"{outbound.get('server')}:{outbound.get('port')}:{outbound.get('uuid', '')}"
         if unique_key not in seen:
             seen.add(unique_key)
             unique_configs.append(cfg)
     return unique_configs
 
-# ==================== ۴. بخش تست کیفیت لایه ۷ (سینگ‌باکس) ====================
+# ==================== ۴. تست لایه ۷ با ابزار پیشرفت کار مانیتورینگ ====================
 def create_singbox_config(outbound_details, local_port):
     return {
         "log": {"level": "silent"},
@@ -169,7 +134,8 @@ def create_singbox_config(outbound_details, local_port):
         "outbounds": [outbound_details, {"type": "direct", "tag": "direct"}]
     }
 
-async def test_l7_config(config, local_port, semaphore):
+async def test_l7_config(config, local_port, semaphore, tracker):
+    """ تست لایه ۷ کانفیگ + آپدیت زنده درصد پیشرفت کار """
     async with semaphore:
         config_file = f"temp_config_{local_port}.json"
         sb_config = create_singbox_config(config['singbox_outbound'], local_port)
@@ -206,6 +172,15 @@ async def test_l7_config(config, local_port, semaphore):
             if os.path.exists(config_file):
                 os.remove(config_file)
 
+        # 📊 آپدیت وضعیت ابزار مانیتورینگ پیشرفت
+        tracker["done"] += 1
+        if is_working:
+            tracker["alive"] += 1
+            
+        percent = (tracker["done"] / tracker["total"]) * 100
+        # نمایش لحظه‌ای درصد و وضعیت در ترمینال
+        print(f"⏳ پیشرفت تست: {percent:.1f}% ({tracker['done']}/{tracker['total']}) | زنده تا این لحظه: {tracker['alive']}", end='\r', flush=True)
+
         return {
             "remark": config['remark'],
             "singbox_outbound": config['singbox_outbound'],
@@ -213,15 +188,13 @@ async def test_l7_config(config, local_port, semaphore):
             "real_delay": round(real_delay, 2) if is_working else "Timeout"
         }
 
-# ==================== ۵. ارکستراتور و مدیریت اصلی سیستم ====================
+# ==================== ۵. بدنه اصلی مدیریت فرآیند ====================
 async def main():
     print("--- مرحله ۱: دانلود هم‌زمان منابع گیت‌هاب ---")
     start_fetch = time.perf_counter()
-    
     async with aiohttp.ClientSession() as session:
         fetch_tasks = [fetch_source(session, url) for url in SOURCES]
         raw_contents = await asyncio.gather(*fetch_tasks)
-        
     print(f"دانلود منابع تمام شد. زمان واکشی: {time.perf_counter() - start_fetch:.2f} ثانیه")
 
     print("\n--- مرحله ۲: استخراج لینک‌ها و فیلتر کردن نوع امنیت (Reality/TLS) ---")
@@ -239,32 +212,42 @@ async def main():
 
     print("\n--- مرحله ۳: حذف کانفیگ‌های تکراری (Deduplication) ---")
     clean_configs = deduplicate_configs(parsed_configs)
-    print(f"تعداد کانفیگ‌های یکتای نهایی برای ارسال به تست لایه ۷: {len(clean_configs)}")
+    total_to_test = len(clean_configs)
+    print(f"تعداد کانفیگ‌های یکتای نهایی برای ارسال به تست لایه ۷: {total_to_test}")
 
-    if not clean_configs:
+    if total_to_test == 0:
         print("کانفیگی برای تست موجود نیست.")
         return
 
-    print("\n--- مرحله ۴: شروع تست پایداری لایه ۷ در گیت‌هاب اکشنز ---")
-    # تنظیم همروندی روی ۳۰ برای سرعت بیشتر در حجم‌های بالا
+    print("\n--- مرحله ۴: شروع تست پایداری لایه ۷ ---")
     max_concurrency = 30
     sem = asyncio.Semaphore(max_concurrency)
+    
+    # 🛠 ساخت دیکشنری مانیتورینگ برای پاس دادن به ورکرها
+    progress_tracker = {
+        "done": 0,
+        "total": total_to_test,
+        "alive": 0
+    }
     
     start_test = time.perf_counter()
     test_tasks = []
     for idx, cfg in enumerate(clean_configs):
         assigned_port = 2000 + (idx % max_concurrency)
-        test_tasks.append(test_l7_config(cfg, assigned_port, sem))
+        # پاس دادن سیستم مانیتورینگ به تابع تست
+        test_tasks.append(test_l7_config(cfg, assigned_port, sem, progress_tracker))
 
     results = await asyncio.gather(*test_tasks)
     
+    # چاپ یک اینتر در پایان کار مانیتورینگ تا خط بعدی خراب نشود
+    print("") 
+
     working_configs = [res for res in results if res['is_working']]
     working_configs.sort(key=lambda x: x['real_delay'])
 
     print(f"\n--- پایان کل فرآیند در {time.perf_counter() - start_test:.2f} ثانیه ---")
     print(f"تعداد کانفیگ‌های ۱۰۰٪ سالم و پرسرعت: {len(working_configs)}")
 
-    # ذخیره در فایل خروجی
     with open("valid_configs.json", "w", encoding="utf-8") as f:
         json.dump(working_configs, f, indent=2, ensure_ascii=False)
     print("خروجی نهایی در فایل valid_configs.json ذخیره شد.")
