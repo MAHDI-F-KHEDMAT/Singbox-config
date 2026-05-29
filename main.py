@@ -138,7 +138,7 @@ def create_xray_config(outbound_details, local_port):
         "outbounds": [outbound_details, {"protocol": "freedom", "tag": "direct"}]
     }
 
-# --- تست سریع مرحله اول با نشست‌های بازیافت‌شده ---
+# --- تست سریع مرحله اول ---
 async def test_quick_alive(config, port_queue, semaphore, sessions_pool, tracker):
     async with semaphore:
         local_port = await port_queue.get()
@@ -153,7 +153,7 @@ async def test_quick_alive(config, port_queue, semaphore, sessions_pool, tracker
         await asyncio.sleep(0.25)
         
         url = "http://cp.cloudflare.com/generate_204"
-        session = sessions_pool[local_port] # استفاده از سشن ثابت پورت جهت جلوگیری از پر شدن سوکت
+        session = sessions_pool[local_port]
         is_alive = False
 
         try:
@@ -171,9 +171,9 @@ async def test_quick_alive(config, port_queue, semaphore, sessions_pool, tracker
         tracker["done"] += 1
         if is_alive: tracker["alive"] += 1
         
-        # چاپ استاندارد بدون \r هر ۲۰۰ کانفیگ یک‌بار برای سبک نگه داشتن ریپورت گیت‌هاب
+        # 🔥 اضافه شدن flush=True برای نمایش آنی لاگ‌ها در گیت‌هاب
         if tracker["done"] % 200 == 0 or tracker["done"] == tracker["total"]:
-            print(f"   📊 پیشرفت مرحله اول Xray: {tracker['done']}/{tracker['total']} | زنده تا این لحظه: {tracker['alive']}")
+            print(f"   📊 پیشرفت مرحله اول Xray: {tracker['done']}/{tracker['total']} | زنده تا این لحظه: {tracker['alive']}", flush=True)
             
         return config if is_alive else None
 
@@ -218,23 +218,23 @@ async def test_10s_stability(config, port_queue, semaphore, sessions_pool, track
             tracker["stable"] += 1
             avg_delay = round(sum(delays) / 5, 2)
             if tracker["done"] % 20 == 0 or tracker["done"] == tracker["total"]:
-                print(f"   🧬 پیشرفت تست پایداری: {tracker['done']}/{tracker['total']} | فوق پایدار ثبت شده: {tracker['stable']}")
+                print(f"   🧬 پیشرفت تست پایداری: {tracker['done']}/{tracker['total']} | فوق پایدار ثبت شده: {tracker['stable']}", flush=True)
             return {
                 "remark": config['remark'], "xray_outbound": config['xray_outbound'], "raw_link": config['raw_link'],
                 "stability": "100%", "avg_delay_ms": avg_delay
             }
         
         if tracker["done"] % 20 == 0 or tracker["done"] == tracker["total"]:
-            print(f"   🧬 پیشرفت تست پایداری: {tracker['done']}/{tracker['total']} | فوق پایدار ثبت شده: {tracker['stable']}")
+            print(f"   🧬 پیشرفت تست پایداری: {tracker['done']}/{tracker['total']} | فوق پایدار ثبت شده: {tracker['stable']}", flush=True)
         return None
 
 async def main():
-    print("--- مرحله ۱: دانلود منابع کانفیگ رایگان ---")
+    print("--- مرحله ۱: دانلود منابع کانفیگ رایگان ---", flush=True)
     async with aiohttp.ClientSession() as session:
         fetch_tasks = [fetch_source(session, url) for url in SOURCES]
         raw_contents = await asyncio.gather(*fetch_tasks)
 
-    print("\n--- مرحله ۲: استخراج لینک‌ها و حذف تکراری‌ها ---")
+    print("\n--- مرحله ۲: استخراج لینک‌ها و حذف تکراری‌ها ---", flush=True)
     all_raw_links = []
     for content in raw_contents: all_raw_links.extend(extract_vless_links(content))
 
@@ -245,28 +245,25 @@ async def main():
 
     clean_configs = deduplicate_configs(parsed_configs)
     total_configs = len(clean_configs)
-    print(f"📢 تعداد کل کانفیگ‌های منحصربه‌فرد برای تست: {total_configs}")
+    print(f"📢 تعداد کل کانفیگ‌های منحصربه‌فرد برای تست: {total_configs}", flush=True)
 
     if total_configs == 0:
-        print("❌ هیچ کانفیگ معتبری پیدا نشد.")
+        print("❌ هیچ کانفیگ معتبری پیدا نشد.", flush=True)
         return
 
-    # پیکربندی صف پورت‌ها و همزمانی
     max_concurrency = 40
     start_port = 10000
     port_queue = asyncio.Queue()
     for p in range(start_port, start_port + max_concurrency): port_queue.put_nowait(p)
     sem = asyncio.Semaphore(max_concurrency)
 
-    # 🛑 ساخت استخر سشن‌های ثابت پورت برای جلوگیری از باز و بسته شدن مکرر سوکت‌ها (حل مشکل قفل شدن شبکه)
     sessions_pool = {}
     for p in range(start_port, start_port + max_concurrency):
         connector = ProxyConnector.from_url(f"socks5://127.0.0.1:{p}")
         sessions_pool[p] = aiohttp.ClientSession(connector=connector)
 
     try:
-        # 📌 شروع رسمی مرحله اول (Xray)
-        print("\n⚡ [مرحله اول]: شروع تست سریع زنده بودن با هسته Xray...")
+        print("\n⚡ [مرحله اول]: شروع تست سریع زنده بودن با هسته Xray...", flush=True)
         quick_tracker = {"done": 0, "total": total_configs, "alive": 0}
         quick_tasks = [test_quick_alive(cfg, port_queue, sem, sessions_pool, quick_tracker) for cfg in clean_configs]
         quick_results = await asyncio.gather(*quick_tasks)
@@ -274,16 +271,15 @@ async def main():
         alive_first_stage = [res for res in quick_results if res is not None]
         total_alive = len(alive_first_stage)
         
-        print(f"\n🏁 نتایج مرحله اول مشخص شد:")
-        print(f"   🔹 تعداد کانفیگ‌های اسکن شده: {total_configs}")
-        print(f"   🔹 تعداد کانفیگ‌های زنده عبور کرده از فیلتر اول Xray: {total_alive}")
+        print(f"\n🏁 نتایج مرحله اول مشخص شد:", flush=True)
+        print(f"   🔹 تعداد کانفیگ‌های اسکن شده: {total_configs}", flush=True)
+        print(f"   🔹 تعداد کانفیگ‌های زنده عبور کرده از فیلتر اول Xray: {total_alive}", flush=True)
 
         if total_alive == 0:
-            print("❌ متاسفانه هیچ کانفیگی از مرحله اول زنده بیرون نیامد. پایان عملیات.")
+            print("❌ متاسفانه هیچ کانفیگی از مرحله اول زنده بیرون نیامد. پایان عملیات.", flush=True)
             return
 
-        # 📌 شروع رسمی مرحله دوم (Stability)
-        print(f"\n🚀 [مرحله دوم]: شروع تست قرنطینه ۱۰ ثانیه‌ای فقط برای {total_alive} کانفیگ زنده...")
+        print(f"\n🚀 [مرحله دوم]: شروع تست قرنطینه ۱۰ ثانیه‌ای فقط برای {total_alive} کانفیگ زنده...", flush=True)
         stable_sem = asyncio.Semaphore(15) 
         stable_tracker = {"done": 0, "total": total_alive, "stable": 0}
         stable_tasks = [test_10s_stability(cfg, port_queue, stable_sem, sessions_pool, stable_tracker) for cfg in alive_first_stage]
@@ -292,20 +288,19 @@ async def main():
         final_stable_configs = [res for res in stable_results if res is not None]
         final_stable_configs.sort(key=lambda x: x['avg_delay_ms'])
 
-        print(f"\n🏁 نتایج نهایی تست پایداری مشخص شد:")
-        print(f"   👑 تعداد کانفیگ‌های ۱۰۰٪ پایدار و بدون پکت‌لاست: {len(final_stable_configs)}")
+        print(f"\n🏁 نتایج نهایی تست پایداری مشخص شد:", flush=True)
+        print(f"   👑 تعداد کانفیگ‌های ۱۰۰٪ پایدار و بدون پکت‌لاست: {len(final_stable_configs)}", flush=True)
 
-        print("\n--- مرحله ۵: ذخیره‌سازی فایل‌های نهایی در ریپازیتوری ---")
+        print("\n--- مرحله ۵: ذخیره‌سازی فایل‌های نهایی در ریپازیتوری ---", flush=True)
         with open("sub.txt", "w", encoding="utf-8") as f:
             for cfg in final_stable_configs: f.write(cfg['raw_link'] + "\n")
                 
         with open("valid_configs.json", "w", encoding="utf-8") as f:
             json.dump(final_stable_configs, f, indent=2, ensure_ascii=False)
             
-        print(f"✅ فایل‌های sub.txt و valid_configs.json با موفقیت آپدیت شدند.")
+        print(f"✅ فایل‌های sub.txt و valid_configs.json با موفقیت آپدیت شدند.", flush=True)
         
     finally:
-        # بستن اصولی استخر سشن‌ها در پایان کار
         for p, sess in sessions_pool.items():
             await sess.close()
 
