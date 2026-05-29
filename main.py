@@ -138,33 +138,30 @@ def create_xray_config(outbound_details, local_port):
         "outbounds": [outbound_details, {"protocol": "freedom", "tag": "direct"}]
     }
 
-# --- 🔥 مرحله جدید: تست سریع لایه انتقال (TCP Ping بستن پورت‌های مرده بدون نیاز به زدن پروسه Xray) ---
+# --- مرحله صفر: تست سریع باز بودن پورت TCP ---
 async def test_tcp_ping(config, semaphore, tracker):
     async with semaphore:
         host = config['server']
         port = config['port']
         is_reachable = False
         try:
-            # ایجاد یک سوکت مستقیم بدون پراکسی؛ بررسی باز بودن پورت در ۱.۵ ثانیه
             reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(host, port), timeout=1.5
             )
             writer.close()
             await writer.wait_closed()
             is_reachable = True
-        except Exception:
-            pass
+        except Exception: pass
 
         tracker["done"] += 1
         if is_reachable: tracker["passed"] += 1
         
-        # لاگ استاندارد هر ۱۰۰۰ کانفیگ یک‌بار برای مانیتورینگ اولیه
         if tracker["done"] % 1000 == 0 or tracker["done"] == tracker["total"]:
             print(f"   🔍 پیشرفت غربالگری پورت TCP: {tracker['done']}/{tracker['total']} | پورت‌های باز عبور کرده: {tracker['passed']}", flush=True)
             
         return config if is_reachable else None
 
-# --- مرحله اول تست زنده بودن هسته Xray (فقط برای سرورهایی که پورتشان باز بود) ---
+# --- مرحله اول: تست صحت اتصال اینترنت با هسته Xray ---
 async def test_quick_alive(config, port_queue, semaphore, sessions_pool, tracker):
     async with semaphore:
         local_port = await port_queue.get()
@@ -202,7 +199,7 @@ async def test_quick_alive(config, port_queue, semaphore, sessions_pool, tracker
             
         return config if is_alive else None
 
-# --- مرحله دوم تست پایداری ۱۰ ثانیه‌ای ---
+# --- مرحله دوم: تست پایداری ۱۰ ثانیه‌ای و پکت‌لاست ---
 async def test_10s_stability(config, port_queue, semaphore, sessions_pool, tracker):
     async with semaphore:
         local_port = await port_queue.get()
@@ -276,9 +273,9 @@ async def main():
         print("❌ هیچ کانفیگ معتبری پیدا نشد.", flush=True)
         return
 
-    # 🛑 [مرحله صفر] - فیلتر فوق‌العاده سریع پورت‌های TCP
+    # [مرحله صفر] - فیلتر مستقیم TCP پینگ بدون درگیر کردن هارد یا هسته Xray
     print("\n⚡ [مرحله صفر]: غربالگری لایه انتقال (TCP Ping) جهت فیلتر آنی سرورهای خاموش...", flush=True)
-    tcp_sem = asyncio.Semaphore(150) # چون تست بسیار سبک است، همزمانی بالا تا ۱۵۰ اتصال همزمان مجاز است
+    tcp_sem = asyncio.Semaphore(150) 
     tcp_tracker = {"done": 0, "total": total_configs, "passed": 0}
     tcp_tasks = [test_tcp_ping(cfg, tcp_sem, tcp_tracker) for cfg in clean_configs]
     tcp_results = await asyncio.gather(*tcp_tasks)
@@ -288,14 +285,14 @@ async def main():
     
     print(f"\n🏁 نتایج مرحله پیش‌فیلتر مشخص شد:")
     print(f"   🔹 تعداد کل کانفیگ‌های ورودی: {total_configs}")
-    print(f"   🔹 تعداد سرورهایی که زنده بودند و پورتشان باز بود: {total_tcp_passed}")
-    print(f"   🔥 ریزش اولیه: {total_configs - total_tcp_passed} کانفیگ سوخته بدون درگیر کردن هسته Xray حذف شدند!")
+    print(f"   🔹 تعداد سرورهایی که پورتشان باز بود: {total_tcp_passed}")
+    print(f"   🔥 ریزش اولیه: {total_configs - total_tcp_passed} کانفیگ سوخته کاملاً حذف شدند!")
 
     if total_tcp_passed == 0:
         print("❌ متاسفانه هیچ پورت باز یا سرور روشنی یافت نشد. پایان عملیات.", flush=True)
         return
 
-    # تنظیمات همزمانی پورت‌های لوکال برای Xray
+    # پیکربندی کانفیگ‌های راه‌یافته به تست Xray
     max_concurrency = 40
     start_port = 10000
     port_queue = asyncio.Queue()
@@ -308,7 +305,7 @@ async def main():
         sessions_pool[p] = aiohttp.ClientSession(connector=connector)
 
     try:
-        # [مرحله اول] - تست واقعی هندشیک شبکه با هسته Xray
+        # [مرحله اول] - اجرای تست دقیق اینترنت با هسته Xray
         print(f"\n⚡ [مرحله اول]: شروع تست زنده بودن هسته Xray فقط برای {total_tcp_passed} سرور منتخب...", flush=True)
         quick_tracker = {"done": 0, "total": total_tcp_passed, "alive": 0}
         quick_tasks = [test_quick_alive(cfg, port_queue, sem, sessions_pool, quick_tracker) for cfg in tcp_passed_configs]
@@ -324,7 +321,7 @@ async def main():
             print("❌ متاسفانه هیچ کانفیگی پاسخ معتبر اینترنتی نداد. پایان عملیات.", flush=True)
             return
 
-        # [مرحله دوم] - تست نهایی پایداری ۱۰ ثانیه‌ای
+        # [مرحله دوم] - سنجش عدم نوسان و پایداری قطعی
         print(f"\n🚀 [مرحله دوم]: شروع تست قرنطینه ۱۰ ثانیه‌ای برای {total_alive} کانفیگ زنده تایید شده...", flush=True)
         stable_sem = asyncio.Semaphore(15) 
         stable_tracker = {"done": 0, "total": total_alive, "stable": 0}
@@ -338,13 +335,23 @@ async def main():
         print(f"   👑 تعداد نهایی کانفیگ‌های فوق پایدار و بدون قطعی: {len(final_stable_configs)}", flush=True)
 
         print("\n--- مرحله پایانی: ذخیره‌سازی خروجی تفکیک‌شده در ریپازیتوری ---", flush=True)
+        
+        # ۱. ذخیره متنی ساده (Plain TXT)
         with open("sub.txt", "w", encoding="utf-8") as f:
-            for cfg in final_stable_configs: f.write(cfg['raw_link'] + "\n")
+            for cfg in final_stable_configs: 
+                f.write(cfg['raw_link'] + "\n")
                 
+        # ۲. ذخیره متنی کدگذاری شده (Base64 TXT) استاندارد کلاینت‌ها
+        all_links_str = "\n".join([cfg['raw_link'] for cfg in final_stable_configs])
+        b64_encoded = base64.b64encode(all_links_str.encode("utf-8")).decode("utf-8")
+        with open("sub_b64.txt", "w", encoding="utf-8") as f:
+            f.write(b64_encoded)
+            
+        # ۳. ذخیره دیتاهای جی‌سان
         with open("valid_configs.json", "w", encoding="utf-8") as f:
             json.dump(final_stable_configs, f, indent=2, ensure_ascii=False)
             
-        print(f"✅ فایل‌های خروجی با موفقیت و بالاترین فیلتر کیفی ممکن به روز رسانی شدند.", flush=True)
+        print(f"✅ فایل‌های خروجی (sub.txt, sub_b64.txt, valid_configs.json) با موفقیت به‌روزرسانی شدند.", flush=True)
         
     finally:
         for p, sess in sessions_pool.items():
